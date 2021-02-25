@@ -67,7 +67,7 @@ impl TerminalDisplaySize for DisplaySize64x48 {
 }
 
 /// Contains the new row that the cursor has wrapped around to
-struct CursorWrapEvent(u8);
+struct CursorWrapEvent(u8, bool);
 
 struct Cursor {
     col: u8,
@@ -95,7 +95,7 @@ impl Cursor {
         self.col = (self.col + 1) % self.width;
         if self.col == 0 {
             self.row = (self.row + 1) % self.height;
-            Some(CursorWrapEvent(self.row))
+            Some(CursorWrapEvent(self.row, true))
         } else {
             None
         }
@@ -106,7 +106,7 @@ impl Cursor {
     pub fn advance_line(&mut self) -> CursorWrapEvent {
         self.row = (self.row + 1) % self.height;
         self.col = 0;
-        CursorWrapEvent(self.row)
+        CursorWrapEvent(self.row, true)
     }
 
     /// Sets the position of the logical cursor arbitrarily.
@@ -167,6 +167,8 @@ where
 {
     properties: DisplayProperties<DI, DSIZE>,
     cursor: Option<Cursor>,
+    offset: Option<u8>,
+    queue_scroll: Option<(u8, bool)>,
 }
 
 impl<DI, DSIZE> DisplayModeTrait<DI, DSIZE> for TerminalMode<DI, DSIZE>
@@ -179,6 +181,8 @@ where
         TerminalMode {
             properties,
             cursor: None,
+            offset: None,
+            queue_scroll: None,
         }
     }
 
@@ -216,6 +220,9 @@ where
 
         // But for normal operation we manage the line wrapping
         self.properties.change_mode(AddrMode::Page).terminal_err()?;
+        self.properties.set_offset(0).terminal_err()?;
+        self.offset = None;
+        self.queue_scroll = None;
         self.reset_pos()?;
 
         Ok(())
@@ -228,11 +235,17 @@ where
 
     /// Print a character to the display
     pub fn print_char(&mut self, c: char) -> Result<(), TerminalModeError> {
+        if let Some((new_line, wrapped)) = self.queue_scroll.take() {
+            self.try_scroll(new_line, wrapped)?;
+        }
+
         match c {
             '\n' => {
-                let CursorWrapEvent(new_line) = self.ensure_cursor()?.advance_line();
+                let CursorWrapEvent(new_line, wrapped) = self.ensure_cursor()?.advance_line();
                 self.properties.set_column(0).terminal_err()?;
                 self.properties.set_row(new_line * 8).terminal_err()?;
+
+                self.queue_scroll = Some((new_line, wrapped));
             }
             '\r' => {
                 self.properties.set_column(0).terminal_err()?;
@@ -267,6 +280,7 @@ where
         self.properties
             .init_with_mode(AddrMode::Page)
             .terminal_err()?;
+        self.properties.set_offset(0).terminal_err()?;
         self.reset_pos()?;
         Ok(())
     }
@@ -347,9 +361,41 @@ where
     fn advance_cursor(&mut self) -> Result<(), TerminalModeError> {
         let cursor = self.ensure_cursor()?;
 
-        cursor.advance();
+        let wrap = cursor.advance();
         let (c, r) = cursor.get_position();
         self.set_position(c, r)?;
+
+        if let Some(CursorWrapEvent(row, wrapped)) = wrap {
+            self.queue_scroll = Some((row, wrapped));
+        }
+
+        Ok(())
+    }
+
+    fn try_scroll(&mut self, row: u8, wrapped: bool) -> Result<(), TerminalModeError> {
+        match (self.offset, wrapped, row) {
+            // We overflowed back to the first row, filling the screen for the first time.
+            (None, true, 0) => {
+                self.offset = Some(8);
+                self.properties.set_offset(8).terminal_err()?;
+            }
+            // We wrapped, and have an existing offset.
+            (Some(cur_offset), true, _) => {
+                let new_offset = (cur_offset + 8) % DSIZE::HEIGHT;
+                self.offset = Some(new_offset);
+                self.properties.set_offset(new_offset).terminal_err()?;
+            }
+            // No wrap, so nothing to do, or we haven't filled the screen yet.
+            (_, false, _) | (None, true, _) => return Ok(()),
+        }
+
+        // Need to clear the line by sending a line's worth of empty.
+        for _ in 0..DSIZE::WIDTH * 8 {
+            self.properties.draw(&[0; 8]).terminal_err()?;
+        }
+        // Now reset back to where we should be.
+        self.properties.set_column(0).terminal_err()?;
+        self.properties.set_row(row * 8).terminal_err()?;
 
         Ok(())
     }

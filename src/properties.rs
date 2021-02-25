@@ -88,6 +88,12 @@ where
         Ok(())
     }
 
+    /// Changes the display offset
+    pub fn set_offset(&mut self, offset: u8) -> Result<(), DisplayError> {
+        Command::DisplayOffset(offset).send(&mut self.iface)?;
+        Ok(())
+    }
+
     /// Set the position in the framebuffer of the display limiting where any sent data should be
     /// drawn. This method can be used for changing the affected area on the screen as well
     /// as (re-)setting the start point of the next `draw` call.
