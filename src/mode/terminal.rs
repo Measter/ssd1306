@@ -390,7 +390,8 @@ where
         }
 
         // Need to clear the line by sending a line's worth of empty.
-        for _ in 0..DSIZE::WIDTH * 8 {
+        self.properties.set_column(0).terminal_err()?;
+        for _ in 0..DSIZE::WIDTH / 8 {
             self.properties.draw(&[0; 8]).terminal_err()?;
         }
         // Now reset back to where we should be.
